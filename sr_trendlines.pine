@@ -1,0 +1,343 @@
+// ----------------------------------------------------
+// AMD-strategy (Refactored, All Fixes) by Dobó Fülöp
+// ----------------------------------------------------
+//@version=5
+indicator(title='AMD-strategy (All Fixes)', shorttitle='AMD Refactored', overlay=true)
+
+// ─────────────────────────────────────────────────────
+//                     ► INPUTS ◄
+// ─────────────────────────────────────────────────────
+groupPivot       = "Pivots"
+groupEMA         = "EMA"
+groupSR          = "S/R"
+groupColors      = "Colors"
+groupSession     = "Session Settings"
+
+// Pivots
+int    pivotPeriod         = input.int(defval=22, title="Pivot Period", minval=10, maxval=500, group=groupPivot)
+string pivotPointSource    = input.string(defval='High/Low', title='Pivot Source', options=['High/Low', 'Close/Open'], group=groupPivot)
+int    pivotPointsToCheck  = input.int(defval=44, title="Number of Pivot Points to check", minval=2, maxval=100, group=groupPivot)
+bool   showPivotPoints     = input.bool(false, title='Show Pivot Points', group=groupPivot)
+
+// EMA
+int    emaLength           = input.int(defval=200, title="EMA length", group=groupEMA)
+
+// S/R
+int    strengthMin         = input.int(defval=2, title='Minimum Strength', minval=1, maxval=10, group=groupSR)
+int    channelWidth        = input.int(defval=8, title='Maximum Channel Width %', minval=1, group=groupSR)
+int    maxNumSR            = input.int(defval=10, title='Maximum Number of S/R', minval=1, maxval=10, group=groupSR)
+int    labelOffset         = input.int(defval=50, title='Label Location (bars ahead)', group=groupColors, 
+                                       tooltip='Pozitív szám jövőbeni barokat jelent, negatív az előzmény barokra (history).')
+
+// Időszak, amelytől rajzolni szeretnénk
+int    startYear           = input.int(defval=2024, title = "Start Year", group=groupSession)
+int    startMonth          = 10
+int    startDay            = 1
+int    startTime           = timestamp(startYear, startMonth, startDay, 0, 0, 0)
+
+// ─────────────────────────────────────────────────────
+//                ► CONSTANTS & COLORS ◄
+// ─────────────────────────────────────────────────────
+int    trendLineMax        = 10000
+int    trendLineWidth      = 1
+int    resistanceLineWidth = 1
+color  uptrendColor        = color.lime
+color  supportColor        = color.lime
+color  downtrendColor      = color.red
+color  resistanceColor     = color.red
+
+string lineStyleSR         = line.style_dashed  // "dashed"
+
+// Pivot for High/Low or Close/Open
+float pivotSourceMax       = pivotPointSource == 'High/Low' ? high : math.max(close, open)
+float pivotSourceMin       = pivotPointSource == 'High/Low' ? low  : math.min(close, open)
+
+// Pivots
+float pivotHigh            = ta.pivothigh(pivotSourceMax, pivotPeriod, pivotPeriod)
+float pivotLow             = ta.pivotlow(pivotSourceMin, pivotPeriod, pivotPeriod)
+bool  isPivotHigh          = not na(pivotHigh)
+bool  isPivotLow           = not na(pivotLow)
+
+// S/R zóna szélesség százalékos értéke a csúcs/minimum range alapján
+float srZoneMaxWidth       = (ta.highest(3000) - ta.lowest(3000)) * channelWidth / 100
+
+// ─────────────────────────────────────────────────────
+//   ► ARRAYS for STORING PIVOTS & S/R & LINES ◄
+// ─────────────────────────────────────────────────────
+// PIVOT Highs
+var float[] pivotHighVals   = array.new_float(pivotPointsToCheck)
+var int[]   pivotHighBars   = array.new_int(pivotPointsToCheck)
+
+// PIVOT Lows
+var float[] pivotLowVals    = array.new_float(pivotPointsToCheck)
+var int[]   pivotLowBars    = array.new_int(pivotPointsToCheck)
+
+// Trendlines
+var line[]  uptrendLines    = array.new_line(trendLineMax+1, na)
+var line[]  downtrendLines  = array.new_line(trendLineMax+1, na)
+
+// S/R
+var float[] srStorage       = array.new_float(0)   // Ebbe gyűjtjük a pivot-értékeket
+var float[] srUpLevel       = array.new_float(0)
+var float[] srDnLevel       = array.new_float(0)
+var float[] srStrengthArr   = array.new_float(0)
+var line[]  srLines         = array.new_line(maxNumSR+1, na)
+var label[] srLabels        = array.new_label(maxNumSR+1, na)
+
+// ─────────────────────────────────────────────────────
+//            ► GLOBAL COUNTERS (AS VAR) ◄
+// ─────────────────────────────────────────────────────
+var int countUpTrendLines   = 0
+var int countDownTrendLines = 0
+
+// ─────────────────────────────────────────────────────
+//                 ► UTILITY FUNCTIONS ◄
+// ─────────────────────────────────────────────────────
+
+// Pivot érték hozzáadása a High/Low tároló tömbökhöz
+f_addPivotToArray(arrValues, arrPositions, pivotVal) =>
+    // A pivot a "pivotPeriod"-del korábbi bar-hoz tartozik
+    array.unshift(arrValues, pivotVal)
+    array.unshift(arrPositions, bar_index - pivotPeriod)
+    array.pop(arrValues)
+    array.pop(arrPositions)
+
+// Plot shape rajzolása, ha a felhasználó engedélyezi
+plotshape(isPivotHigh and showPivotPoints, text='H', style=shape.labeldown, color=na, textcolor=uptrendColor,   location=location.abovebar, offset=-pivotPeriod)
+plotshape(isPivotLow  and showPivotPoints, text='L', style=shape.labelup,   color=na, textcolor=downtrendColor, location=location.belowbar, offset=-pivotPeriod)
+
+// Ha van új pivot, eltároljuk (csak akkor, ha be van kapcsolva a showPivotPoints)
+if isPivotHigh
+    f_addPivotToArray(pivotHighVals, pivotHighBars, pivotHigh)
+if isPivotLow
+    f_addPivotToArray(pivotLowVals, pivotLowBars, pivotLow)
+
+// ─────────────────────────────────────────────────────
+//             ► TRENDLINE DRAWING ◄
+// ─────────────────────────────────────────────────────
+
+// Törli az összes uptrend/downtrend vonalat
+f_deleteAllTrendLines(_upLines, _downLines) =>
+    for i = 0 to array.size(_upLines) - 1
+        line.delete(array.get(_upLines, i))
+    for i = 0 to array.size(_downLines) - 1
+        line.delete(array.get(_downLines, i))
+
+
+f_calcTrendLines(_upLines, _downLines, _lowVals, _highVals, _lowBars, _highBars) =>
+    int count = 0
+    // Get last 3 low pivot value and location
+    float lowValue1 = array.get(_lowVals, 2)
+    float lowValue2 = array.get(_lowVals, 1)
+    float lowValue3 = array.get(_lowVals, 0)
+
+    int   lowPos1   = array.get(_lowBars, 2)
+    int   lowPos2   = array.get(_lowBars, 1)
+    int   lowPos3   = array.get(_lowBars, 0)
+
+    // Get last 3 high pivot value and location
+    float highValue1 = array.get(_highVals, 2)
+    float highValue2 = array.get(_highVals, 1)
+    float highValue3 = array.get(_highVals, 0)
+
+    int   highPos1   = array.get(_highBars, 2)
+    int   highPos2   = array.get(_highBars, 1)
+    int   highPos3   = array.get(_highBars, 0)
+
+    if array.size(_upLines) > 0
+        if lowValue2 < lowValue3
+            array.set(_upLines, count, line.new(x1=lowPos2, y1=lowValue2, x2=lowPos3, y2=lowValue3, extend=extend.right, style=line.style_dashed, color=uptrendColor, width=trendLineWidth))
+            count += 1
+    if array.size(_downLines) > 0
+        if highValue2 > highValue3
+            array.set(_downLines, count, line.new(x1=highPos1, y1=highValue1, x2=highPos2, y2=highValue2, extend=extend.right, style=line.style_dashed, color=downtrendColor, width=trendLineWidth))
+            count += 1
+
+
+    if lowValue1 < lowValue2
+        array.set(_upLines, array.size(_downLines)-1, line.new(x1=lowPos1, y1=lowValue1, x2=lowPos2, y2=lowValue2, extend=extend.right, color=uptrendColor, width=trendLineWidth))
+        count += 1
+
+    if highValue1 > highValue2
+        line.new(x1=highPos1, y1=highValue1, x2=highPos2, y2=highValue2, extend=extend.right, color=downtrendColor, width=trendLineWidth)
+        
+
+// ─────────────────────────────────────────────────────
+//            ► SUPPORT/RESISTANCE FUNCTIONS ◄
+// ─────────────────────────────────────────────────────
+
+// Ha jön új pivot (High vagy Low), betesszük a srStorage-ba, hogy S/R-nek felhasználjuk.
+if isPivotHigh or isPivotLow
+    array.unshift(srStorage, isPivotHigh ? pivotHigh : pivotLow)
+    if array.size(srStorage) > pivotPointsToCheck
+        array.pop(srStorage)
+
+// Egy zóna max-min értékét és a benne lévő pivotok számát adja vissza
+f_getSRVals(index) =>
+    float lo    = array.get(srStorage, index)
+    float hi    = lo
+    int   count = 0
+
+    if index >= array.size(srStorage)
+        // Visszaadunk valami semleges értékeket
+        [na, na, 0]
+
+    // Végigmegyünk az srStorage elemein
+    for y = 0 to array.size(srStorage) - 1
+        float currentPivot = array.get(srStorage, y)
+        float width        = currentPivot <= lo ? (hi - currentPivot) : (currentPivot - lo)
+        // Belefér-e a csatorna-szélességbe?
+        if width <= srZoneMaxWidth
+            if currentPivot <= hi
+                lo := math.min(lo, currentPivot)
+            else
+                hi := math.max(hi, currentPivot)
+            count += 1
+
+    [hi, lo, count]
+
+// Megnézi, hogy hova illesztjük be strength szerint (srStrengthArr).
+f_findLocation(strength) =>
+    // Először ellenőrizzük a srStrengthArr méretét
+    int arrSize = array.size(srStrengthArr)
+    if arrSize == 0
+        // Ha nincs még elem, nyugodtan 0-át return, az lesz a beszúrási hely
+        0
+    else
+        int ret = arrSize
+        for i = arrSize - 1 to 0 by 1
+            if strength <= array.get(srStrengthArr, i)
+                break
+            ret := i
+        ret
+
+// Megnézi, hogy [hi, lo] zóna létezik-e már, ha igen, cseréli ha erősebb
+f_checkSR(hi, lo, strength) =>
+    bool ret = true
+
+    // Ha üres a srUpLevel/srDnLevel/srStrengthArr, nincs mit ellenőrizni
+    if array.size(srUpLevel) == 0 or array.size(srDnLevel) == 0 or array.size(srStrengthArr) == 0
+        ret
+    else
+        // Ciklus
+        // Megjegyzés: a három array mérete elvileg mindig azonos
+        // de legyünk óvatosak:
+        int minSize = math.min(array.size(srUpLevel), math.min(array.size(srDnLevel), array.size(srStrengthArr)))
+        for i = 0 to minSize - 1
+            float up = array.get(srUpLevel, i)
+            float dn = array.get(srDnLevel, i)
+            float oldStrength = array.get(srStrengthArr, i)
+
+            if (up >= lo and up <= hi) or (dn >= lo and dn <= hi)
+                if strength >= oldStrength
+                    array.remove(srStrengthArr, i)
+                    array.remove(srUpLevel, i)
+                    array.remove(srDnLevel, i)
+                    ret
+                else
+                    ret := false
+                    ret
+                break
+        ret
+
+// Újraszámolja az S/R zónákat
+f_recalculateSRZones() =>
+    // Töröljük a korábbi adatokat
+    array.clear(srUpLevel)
+    array.clear(srDnLevel)
+    array.clear(srStrengthArr)
+
+    // Ha üres a srStorage, nincs mit csinálni
+    if array.size(srStorage) == 0
+        na
+    else
+        // Végigmegyünk a srStorage pivotjain
+        for x = 0 to array.size(srStorage) - 1
+            [hi, lo, strength] = f_getSRVals(x)
+
+            // Megnézzük, létezik-e már a zóna
+            if f_checkSR(hi, lo, strength)
+                // Ha nincs, vagy gyengébb volt, akkor beszúrjuk
+                int loc = f_findLocation(strength)
+                if loc < maxNumSR and strength >= strengthMin
+                    array.insert(srStrengthArr, loc, strength)
+                    array.insert(srUpLevel,    loc, hi)
+                    array.insert(srDnLevel,    loc, lo)
+
+                    // Túlcsordulás
+                    if array.size(srStrengthArr) > maxNumSR
+                        array.pop(srStrengthArr)
+                        array.pop(srUpLevel)
+                        array.pop(srDnLevel)
+
+        // Régi vonalak/label-ek törlése
+        for x = 1 to maxNumSR
+            line.delete(array.get(srLines, x))
+            label.delete(array.get(srLabels, x))
+
+        // Új S/R vonalak és label-ek
+        for x = 0 to array.size(srUpLevel) - 1
+            if array.size(srUpLevel) > 0 and array.size(srDnLevel) > 0
+                float mid   = math.round_to_mintick((array.get(srUpLevel, x) + array.get(srDnLevel, x)) / 2)
+                float rate  = 100 * (mid - close) / close
+                color c     = mid >= close ? resistanceColor : supportColor
+                color lc    = mid >= close ? color.white     : color.black
+                string ls = mid >= close ? label.style_label_down : label.style_label_up
+
+                label lbl = label.new(x=bar_index + labelOffset, y=mid, text=str.tostring(mid) + " (" + str.tostring(rate, "#.##") + "%)", color=c, textcolor=lc, style=ls)
+                array.set(srLabels, x+1, lbl)
+
+                line ln = line.new(x1=bar_index, y1=mid, x2=bar_index-1, y2=mid, extend=extend.both, color=c, style=lineStyleSR, width=resistanceLineWidth)
+                array.set(srLines, x+1, ln)
+
+// Keresztirányú mozgás ellenőrzése (felfelé átütés)
+f_crossedOver() =>
+    bool ret = false
+    // Csak akkor vizsgáljuk, ha van legalább 1 zóna, és van előző bar (bar_index > 0)
+    if bar_index > 0 and array.size(srUpLevel) > 0 and array.size(srDnLevel) > 0
+        int size = math.min(array.size(srUpLevel), array.size(srDnLevel))
+        for x = 0 to size - 1
+            float mid = math.round_to_mintick((array.get(srUpLevel, x) + array.get(srDnLevel, x)) / 2)
+            if close[1] <= mid and close > mid
+                ret := true
+                break
+    ret
+
+// Keresztirányú mozgás ellenőrzése (lefelé átütés)
+f_crossedUnder() =>
+    bool ret = false
+    if bar_index > 0 and array.size(srUpLevel) > 0 and array.size(srDnLevel) > 0
+        int size = math.min(array.size(srUpLevel), array.size(srDnLevel))
+        for x = 0 to size - 1
+            float mid = math.round_to_mintick((array.get(srUpLevel, x) + array.get(srDnLevel, x)) / 2)
+            if close[1] >= mid and close < mid
+                ret := true
+                break
+    ret
+
+// ─────────────────────────────────────────────────────
+//   ► MAIN LOGIC: TRENDLINE UPDATE & S/R RECALC ◄
+// ─────────────────────────────────────────────────────
+if time >= startTime
+    // Először töröljük a korábbi trendvonalakat
+    // f_deleteAllTrendLines(uptrendLines, downtrendLines)
+    f_calcTrendLines(uptrendLines, downtrendLines, pivotLowVals, pivotHighVals, pivotLowBars, pivotHighBars)
+
+    // Újraszámoljuk az S/R zónákat, ha van friss pivot
+    if isPivotHigh or isPivotLow
+        f_recalculateSRZones()
+
+// ─────────────────────────────────────────────────────
+//              ► ALERT CONDITIONS ◄
+// ─────────────────────────────────────────────────────
+bool crossedOver  = f_crossedOver()
+bool crossedUnder = f_crossedUnder()
+
+alertcondition(crossedOver,  title='Resistance Broken', message='Resistance Broken')
+alertcondition(crossedUnder, title='Support Broken',    message='Support Broken')
+alertcondition(crossedOver or crossedUnder, title='Support or Resistance Broken', message='Support or Resistance Broken')
+
+// ─────────────────────────────────────────────────────
+//                  ► PLOTTINGS ◄
+// ─────────────────────────────────────────────────────
+plot(ta.ema(close, emaLength), title="EMA", color=color.blue, linewidth=2)
