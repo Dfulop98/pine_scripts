@@ -1,0 +1,190 @@
+// This code is calculating the Fibonacci Golden Wave levels based on the most recent pivot high and low points.
+// The script can be used to identify potential reversal zones in the market.
+// This script is for educational purposes only and should not be considered financial advice. I wrote this script to better understand the Pine Script language and to experiment with different trading strategies.
+// Please do your own research before making any investment decisions.
+// To be inspired by fluxchart indicator
+// © dobofulop
+
+//@version=5
+indicator("FGW | dobofulop", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500, max_bars_back = 5000)
+
+//--------------------------------------------------------------------------------------------------
+// CONSTANTS & DEBUG SETTINGS
+//--------------------------------------------------------------------------------------------------
+
+//   DEBUG: Internal toggle that can be used for debugging purposes.
+//   textBack: Determines how many bars to shift certain text/box elements backward.
+//   pivLen: Maximum number of stored pivot points in the arrays.
+const bool DEBUG     = false
+const int  textBack  = 2
+const int  pivLen    = 10
+
+//--------------------------------------------------------------------------------------------------
+// USER INPUTS
+//--------------------------------------------------------------------------------------------------
+
+//   pivotRange: Number of bars on each side of a pivot used to determine if it is indeed a local high or low.
+//               If 'usePivots' is false, we manually calculate pivot high/low based on the highest/lowest over the
+//               last 'pivotRange' bars. If true, we rely on built-in pivot calls (ta.pivothigh, ta.pivotlow).
+pivotRange = input.int(20, "Swing Range", group = "General Configuration")
+
+//   usePivots: If DEBUG is true, allows toggling between using the built-in pivot functions vs. manual highest/lowest calculations.
+//              If DEBUG is false, this reverts to false and manual pivot detection is used.
+usePivots = DEBUG ? input.bool(false, "Use Pivots", group = "General Configuration") : false
+
+
+//   fibArea1, fibArea2: The two Fibonacci ratio levels used to define the “golden zone.”
+//                       They can be selected from preset values: 0.236, 0.382, 0.5, 0.618, 0.786.
+fibArea1 = input.float(0.5,  "",     options = [0.236, 0.382, 0.5, 0.618, 0.786], group = "Golden Zone", inline = "zone")
+fibArea2 = input.float(0.618, " - ", options = [0.236, 0.382, 0.5, 0.618, 0.786], group = "Golden Zone", inline = "zone")
+
+//   gzLineColor: Color for the golden zone lines.
+//   showArea: Toggle to show or hide the filled area between the Fibonacci lines.
+//   gzAreaColor: Color to fill the area between the two Fibonacci lines.
+gzLineColor  = input.color(color.new(color.yellow, 80), "Golden Zone Lines", group = "Style")
+showArea     = input.bool(true, "Show Area", group = "Style", inline = "area")
+gzAreaColor  = input.color(color.new(color.yellow, 90), "", group = "Style", inline = "area")
+
+//   textSize: The size of any text drawn on the chart (box labels, etc.).
+//   textColor: The color of any text drawn on the chart.
+textSize  = input.string("Normal", "Text Size", options = ["Auto", "Small", "Normal"], group = "Style", inline = "text")
+textColor = input.color(color.new(color.white, 30), "", group = "Style", inline = "text")
+
+//--------------------------------------------------------------------------------------------------
+// DATA STRUCTURES
+//--------------------------------------------------------------------------------------------------
+
+//   pivot struct:
+//     isHigh  - Boolean indicating if it is a high pivot (true) or low pivot (false).
+//     price   - The price value of that pivot (either a local high or a local low).
+//     barTime - The time (in PineScript's timestamp format) at which the pivot occurred.
+type pivot
+    bool isHigh
+    float price
+    int barTime
+
+
+//  highPivots & lowPivots:
+//  These arrays store recent pivot structs for high and low pivots, respectively. 
+//  Only the most recent 'pivLen' pivots are kept in memory.
+var pivot[] highPivots = array.new<pivot>(0)
+var pivot[] lowPivots  = array.new<pivot>(0)
+
+
+//--------------------------------------------------------------------------------------------------
+// PIVOT CALCULATION
+//--------------------------------------------------------------------------------------------------
+
+// pivotHigh, pivotLow: These variables will hold the most recently detected pivot high/low prices.
+// pHighTime, pLowTime: These variables will hold the time (bar index in timestamp format) of the detected pivot.
+float pivotHigh = na
+float pivotLow  = na
+int   pHighTime = na
+int   pLowTime  = na
+
+// Determine pivot highs and lows using either manual calculation or built-in pivot functions.
+if not usePivots
+    // Manual highest/lowest detection over 'pivotRange' bars
+    pivotHigh   := ta.highest(high, pivotRange)
+    pHighTime   := time[math.abs(ta.highestbars(high, pivotRange))]
+
+    pivotLow    := ta.lowest(low, pivotRange)
+    pLowTime    := time[math.abs(ta.lowestbars(low, pivotRange))]
+else
+    // Built-in pivot detection
+    pivotHigh   := ta.pivothigh(pivotRange, pivotRange)
+    pHighTime   := time[pivotRange]
+
+    pivotLow    := ta.pivotlow(pivotRange, pivotRange)
+    pLowTime    := time[pivotRange]
+
+//--------------------------------------------------------------------------------------------------
+// FUNCTIONS
+//--------------------------------------------------------------------------------------------------
+
+//   format_timeFrame(timeFrame) → string
+//   Description:
+//     Takes in a string that denotes a timeframe (e.g., "15", "60", "1D") and returns a human-readable
+//     format for the timeframe. If the input is empty, it defaults to the script's current timeframe.
+//   Parameters:
+//     timeFrame (string) - The timeframe to be formatted.
+//   Returns:
+//     A string representing the timeframe in either a day/week/month format or 
+//     hour/minute format (depending on the input).
+format_timeFrame(timeFrame) =>
+    unit = timeFrame == "" ? timeframe.period : timeFrame
+
+    // If timeframe has letters like D, W, S, or M, we assume daily, weekly, etc.
+    if str.contains(unit, "D") or str.contains(unit, "W") or str.contains(unit, "S") or str.contains(unit, "M")
+        unit
+    else
+        // Otherwise convert to seconds and translate to hours/minutes.
+        seconds = timeframe.in_seconds(unit)
+        if seconds >= 3600
+            hourCount = int(seconds / 3600)
+            str.tostring(hourCount) + " Hour" + (hourCount > 1 ? "s" : "")
+        else
+            unit + " Min"
+
+
+//   get_fibLevels(fib1, fib2) → [float, float]
+//   Description:
+//     Retrieves the two Fibonacci retracement levels (fib1, fib2) based on the most recent
+//     stored high pivot and low pivot. The function calculates the difference between the 
+//     two pivot prices and applies the fib multipliers to derive the levels.
+//   Parameters:
+//     fib1 (float) - The first Fibonacci multiplier (e.g., 0.5).
+//     fib2 (float) - The second Fibonacci multiplier (e.g., 0.618).
+//   Returns:
+//     A tuple [fib050, fib061] representing the two Fibonacci price levels.
+//     Returns [na, na] if insufficient pivots are stored.
+get_fibLevels(fib1, fib2) =>
+    if highPivots.size() > 0 and lowPivots.size() > 0
+        highPivot = highPivots.get(0)
+        lowPivot  = lowPivots.get(0)
+
+        top       = highPivot.price
+        bottom    = lowPivot.price
+
+        difference = top - bottom
+        fib050     = top - (difference * fib1)
+        fib061     = top - (difference * fib2)
+
+        [fib050, fib061]
+    else
+        [na, na]
+
+
+//--------------------------------------------------------------------------------------------------
+// STORE NEW PIVOT DATA
+//--------------------------------------------------------------------------------------------------
+
+//  When a new pivot is detected, store it in the appropriate array (highPivots or lowPivots).
+//  Then remove the oldest pivot if the array exceeds 'pivLen' in size.
+if not na(pivotHigh)
+    highPivots.unshift(pivot.new(true, pivotHigh, pHighTime))
+    if highPivots.size() > pivLen
+        highPivots.pop()
+
+if not na(pivotLow)
+    lowPivots.unshift(pivot.new(false, pivotLow, pLowTime))
+    if lowPivots.size() > pivLen
+        lowPivots.pop()
+
+//--------------------------------------------------------------------------------------------------
+// FIBONACCI LINES & PLOTTING
+//--------------------------------------------------------------------------------------------------
+
+//   fib1, fib2: We directly reference the input floats from fibArea1/fibArea2 for clarity.
+fib1 = fibArea1
+fib2 = fibArea2
+
+[fib05, fib061] = get_fibLevels(fib1, fib2)
+
+// Plot the two Fibonacci lines.
+line05  = plot(fib05,  color = gzLineColor, linewidth = 1, style = plot.style_line, display = display.pane)
+line061 = plot(fib061, color = gzLineColor, linewidth = 1, style = plot.style_line, display = display.pane)
+
+// Fill the area between the two lines if 'showArea' is enabled.
+fill(line05, line061, color = showArea ? gzAreaColor : na)
+
