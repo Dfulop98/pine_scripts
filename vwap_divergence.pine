@@ -1,0 +1,155 @@
+
+// ---------------------------------------------------------
+// VWAP Divergence | dobofulop
+// ---------------------------------------------------------
+// This script calculates a VWAP-based divergence signal
+// for bullish and bearish market conditions. 
+// This script written for educational purposes only. Inspired from luxchart indicator.
+// I Write this script to better understand the Pine Script language and to experiment with different trading strategies.
+// ---------------------------------------------------------
+// Explanation of Key Parts:
+// 1) Inputs and Settings: Adjustable parameters for VWAP behavior and visual settings.
+// 2) Anchor Calculation: Determines when to reset the VWAP based on session/timeframe or corporate events (earnings, dividends, splits).
+// 3) VWAP Calculation: Uses TradingView's built-in ta.vwap() function with a condition to reset when a new anchor period is detected.
+// 4) Divergence Logic: Checks if price movement (close to close) is diverging from the VWAP movement over a defined lookback period.
+// 5) Alerts: Triggers alerts when a bullish or bearish divergence is found.
+// 6) Plotting: Visual representation of the VWAP line and divergence points.
+// ---------------------------------------------------------
+// dobofulop
+
+//@version=5
+indicator(title="VWAP Divergence | dobofulop", shorttitle="WAP Divergence",overlay=true)
+
+// ─────────────────────────────────────────────────────────
+// >> VWAP Settings
+// ─────────────────────────────────────────────────────────
+anchorPeriod = input.string(defval = "Session",title  = "Anchor Period", options= [ "Session", "Week", "Month", "Quarter", "Year", "Decade", "Century", "Earnings", "Dividends", "Splits"],group="VWAP Settings")
+sourcePrice  = input(hlc3, title="Source", group="VWAP Settings")
+offsetPlot   = input(0, title="Offset", group="VWAP Settings")
+
+// ─────────────────────────────────────────────────────────
+// >> Divergence Settings
+// ─────────────────────────────────────────────────────────
+divergenceLookback      = input(5, title="Lookback Period", group="Divergence Settings", tooltip="Number of bars to look back for price movement comparison.")
+divergenceAtrMultiplier = input.float(3, title="ATR Multiplier", group="Divergence Settings", step=0.1, tooltip="Multiple of ATR used to confirm a significant price move for divergence.")
+
+// ─────────────────────────────────────────────────────────
+// >> Visual Settings
+// ─────────────────────────────────────────────────────────
+bearishColor      = input.color(color.red,   title="VWAP Down Color", group="Visual Settings", inline="Colors")
+bullishColor      = input.color(color.lime,  title="VWAP Up Color",   group="Visual Settings", inline="Colors")
+
+// ─────────────────────────────────────────────────────────
+// >> Variables to store last divergence bar index
+// ─────────────────────────────────────────────────────────
+var int lastBullishDivergenceBarIndex = bar_index
+var int lastBearishDivergenceBarIndex = bar_index
+
+// ─────────────────────────────────────────────────────────
+// >> Basic Validation: Check if volume is present
+// ─────────────────────────────────────────────────────────
+
+if barstate.islast and ta.cum(volume) == 0
+    runtime.error("No volume is provided by the data vendor.")
+
+// ─────────────────────────────────────────────────────────
+// >> Corporate Events data requests (for anchor resets)
+// ─────────────────────────────────────────────────────────
+earningsData  = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on,   barmerge.lookahead_on, ignore_invalid_symbol=true)
+dividendsData = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on,  barmerge.lookahead_on, ignore_invalid_symbol=true)
+splitsData    = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on,  barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+// ─────────────────────────────────────────────────────────
+// >> Determine if a new anchor period has started
+// ─────────────────────────────────────────────────────────
+bool isNewPeriod = switch anchorPeriod
+    "Earnings"  => not na(earningsData)
+    "Dividends" => not na(dividendsData)
+    "Splits"    => not na(splitsData)
+    "Session"   => timeframe.change("D")
+    "Week"      => timeframe.change("W")
+    "Month"     => timeframe.change("M")
+    "Quarter"   => timeframe.change("3M")
+    "Year"      => timeframe.change("12M")
+    "Decade"    => timeframe.change("12M") and year % 10 == 0
+    "Century"   => timeframe.change("12M") and year % 100 == 0
+    => false
+
+bool isEsdAnchor   = anchorPeriod == "Earnings" or anchorPeriod == "Dividends" or anchorPeriod == "Splits"
+
+// Force a reset of isNewPeriod if data from the previous bar is unavailable
+if na(sourcePrice[1]) and not isEsdAnchor
+    isNewPeriod := true
+
+// ─────────────────────────────────────────────────────────
+// >> VWAP Calculation
+//    ta.vwap() resets its calculation on each new 'anchor'
+// ─────────────────────────────────────────────────────────
+[vwapValue, stdevUpper, stdevLower] = ta.vwap(sourcePrice, isNewPeriod, 1)
+
+// ─────────────────────────────────────────────────────────
+// >> Plot VWAP
+//    Colors optionally alternate based on VWAP slope
+// ─────────────────────────────────────────────────────────
+plot(vwapValue, title="VWAP", color=(vwapValue > vwapValue[1] ? #00ff0d : #ff0000), offset=offsetPlot, linewidth=2)
+
+// ─────────────────────────────────────────────────────────
+// >> Divergence Calculation
+//    Checking the last X bars for significant price moves
+//    compared against VWAP direction
+// ─────────────────────────────────────────────────────────
+
+// Calculate high-to-low difference for the last lookback bars
+float lookbackGain = high - low[divergenceLookback]
+float lookbackLoss = high[divergenceLookback] - low
+
+// Use ATR(14) as a reference for significant moves
+float currentATR = ta.atr(14)
+
+// Check for large gaps to invalidate signals
+bool hasLargeGap = false
+for i = 0 to divergenceLookback
+    if math.abs(open[i] - close[i+1]) > currentATR
+        hasLargeGap := true
+
+// ---------------------------
+// Bullish Divergence Logic
+// ---------------------------
+// Conditions for bullish divergence:
+// 1) Price is rising (close > close[1])
+// 2) VWAP is decreasing (vwapValue < vwapValue[1])
+// 3) Price gain over lookback is greater than ATR * multiplier
+// 4) Enough bars since last bullish divergence, or a large price swing
+bool isBullishDivergence = (close > close[1]) and (vwapValue < vwapValue[1]) and (lookbackGain > currentATR * divergenceAtrMultiplier) and ((bar_index - lastBullishDivergenceBarIndex > 15) or ((ta.highest(high, 20) - ta.lowest(low, 20) > currentATR * 2) and (bar_index - lastBullishDivergenceBarIndex > 10)))
+
+// Invalidate bullish signal if there's a large gap
+if hasLargeGap
+    isBullishDivergence := false
+
+// Plot a circle below the price to indicate bullish divergence
+plot(isBullishDivergence ? low - currentATR * 0.5 : na, style=plot.style_circles, color=bullishColor, linewidth=3, title="Bullish Divergence Dot")
+
+// Update last bullish divergence bar
+if isBullishDivergence
+    lastBullishDivergenceBarIndex := bar_index
+
+// ---------------------------
+// Bearish Divergence Logic
+// ---------------------------
+// Conditions for bearish divergence:
+// 1) Price is falling (close < close[1])
+// 2) VWAP is increasing (vwapValue > vwapValue[1])
+// 3) Price loss over lookback is greater than ATR * multiplier
+// 4) Enough bars since last bearish divergence, or a large price swing
+bool isBearishDivergence = (close < close[1]) and (vwapValue > vwapValue[1]) and (lookbackLoss > currentATR * divergenceAtrMultiplier) and ((bar_index - lastBearishDivergenceBarIndex > 15) or ((ta.highest(high, 20) - ta.lowest(low, 20) > currentATR * 2) and (bar_index - lastBearishDivergenceBarIndex > 10)))
+
+// Invalidate bearish signal if there's a large gap
+if hasLargeGap
+    isBearishDivergence := false
+
+// Plot a circle above the price to indicate bearish divergence
+plot(isBearishDivergence ? high + currentATR * 0.5 : na, style=plot.style_circles, color=bearishColor, linewidth=3, title="Bearish Divergence Dot")
+
+// Update last bearish divergence bar
+if isBearishDivergence
+    lastBearishDivergenceBarIndex := bar_index
